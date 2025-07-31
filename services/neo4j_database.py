@@ -457,13 +457,42 @@ class Neo4jDatabaseService:
     def _record_to_entity(self, record) -> Optional[Entity]:
         """将Neo4j记录转换为实体对象"""
         try:
+            # 处理aliases字段
+            aliases = record.get('aliases', [])
+            if isinstance(aliases, str):
+                if aliases == '[]':
+                    aliases = []
+                else:
+                    try:
+                        # 尝试解析JSON字符串
+                        aliases = json.loads(aliases)
+                    except json.JSONDecodeError:
+                        # 如果解析失败，当作单个字符串处理
+                        aliases = [aliases] if aliases else []
+            
+            # 确保aliases是列表类型
+            if not isinstance(aliases, list):
+                aliases = []
+            
+            # 处理attributes字段
+            attributes = {}
+            if record.get('attributes'):
+                try:
+                    if isinstance(record['attributes'], str):
+                        attributes = json.loads(record['attributes'])
+                    else:
+                        attributes = record['attributes']
+                except json.JSONDecodeError:
+                    logger.warning(f"无法解析attributes字段: {record['attributes']}")
+                    attributes = {}
+            
             return Entity(
                 id=record.get('id'),
                 name=record.get('name'),
                 type=record.get('type'),
-                aliases=record.get('aliases', []),
+                aliases=aliases,
                 definition=record.get('definition'),
-                attributes=json.loads(record.get('attributes', '{}')) if record.get('attributes') else {},
+                attributes=attributes,
                 source=record.get('source'),
                 create_time=datetime.fromisoformat(record.get('create_time')) if record.get('create_time') else None
             )

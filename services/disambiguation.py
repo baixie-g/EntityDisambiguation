@@ -39,6 +39,17 @@ class DisambiguationService:
         self.db_manager = None
         self.vectorization_service = None
     
+    def normalize_crossencoder_score(self, score: float) -> float:
+        """使用线性归一化CrossEncoder得分"""
+        # 基于实际测试结果的得分范围
+        min_score = -6.5
+        max_score = 7.7
+        
+        # 线性归一化到[0,1]区间
+        normalized = (score - min_score) / (max_score - min_score)
+        # 确保在[0,1]范围内
+        return max(0.0, min(1.0, float(normalized)))
+    
     def _get_db_manager(self):
         """获取数据库管理器实例"""
         if self.db_manager is None:
@@ -60,9 +71,48 @@ class DisambiguationService:
             
         try:
             logger.info(f"加载CrossEncoder模型: {settings.CROSS_ENCODER_MODEL_NAME}")
-            self.cross_encoder = CrossEncoder(settings.CROSS_ENCODER_MODEL_NAME)
-            self.cross_encoder_loaded = True
-            logger.info("CrossEncoder模型加载成功")
+            
+            # 优先使用本地缓存
+            from pathlib import Path
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+            model_dir = cache_dir / "models--cross-encoder--ms-marco-MiniLM-L-6-v2"
+            
+            if model_dir.exists():
+                # 查找snapshots下的最新快照
+                snapshots_dir = model_dir / "snapshots"
+                if snapshots_dir.exists():
+                    snapshots = list(snapshots_dir.iterdir())
+                    if snapshots:
+                        # 按修改时间排序，取最新的
+                        latest_snapshot = max(snapshots, key=lambda x: x.stat().st_mtime)
+                        model_path = str(latest_snapshot)
+                        logger.info(f"发现本地CrossEncoder模型缓存: {model_path}")
+                        try:
+                            self.cross_encoder = CrossEncoder(model_path)
+                            self.cross_encoder_loaded = True
+                            logger.info("CrossEncoder模型加载成功 (本地缓存)")
+                            return
+                        except Exception as cache_error:
+                            logger.warning(f"本地缓存加载失败: {cache_error}")
+            
+            # 如果本地缓存不存在或加载失败，尝试从网络下载
+            logger.info("本地缓存不可用，尝试从网络下载CrossEncoder模型")
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"尝试下载CrossEncoder模型 (第{attempt + 1}次)")
+                    self.cross_encoder = CrossEncoder(settings.CROSS_ENCODER_MODEL_NAME)
+                    self.cross_encoder_loaded = True
+                    logger.info("CrossEncoder模型加载成功")
+                    return
+                except Exception as e:
+                    logger.warning(f"第{attempt + 1}次尝试失败: {e}")
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(5)  # 等待5秒后重试
+                    else:
+                        raise e
+                        
         except Exception as e:
             logger.error(f"加载CrossEncoder模型失败: {e}")
             self.cross_encoder = None
@@ -118,6 +168,9 @@ class DisambiguationService:
     def _smart_search_similar_entities(self, input_entity: Entity, top_k: int = 10) -> List[Tuple[Entity, float]]:
         """智能搜索相似实体，支持可选的type字段"""
         try:
+            # 首先尝试使用FAISS向量搜索
+            vector_similar_entities = self._get_vectorization_service().search_similar_entities(input_entity, top_k=top_k*2)
+            
             # 如果提供了type字段，优先在指定type中搜索
             if input_entity.type:
                 logger.info(f"在指定类型 '{input_entity.type}' 中搜索相似实体")
@@ -127,7 +180,7 @@ class DisambiguationService:
                 
                 if type_entities:
                     # 在指定type中计算相似度
-                    similar_entities = []
+                    type_similar_entities = []
                     for entity in type_entities:
                         # 使用向量化服务计算相似度
                         vector_score = self._get_vectorization_service().get_entity_vector(entity)
@@ -136,16 +189,34 @@ class DisambiguationService:
                             if input_vector is not None:
                                 # 计算余弦相似度
                                 similarity = np.dot(input_vector, vector_score) / (np.linalg.norm(input_vector) * np.linalg.norm(vector_score))
-                                if similarity > settings.LOW_THRESHOLD:
-                                    similar_entities.append((entity, float(similarity)))
+                                # 降低阈值，确保能找到更多候选
+                                if similarity > 0.1:  # 使用更低的阈值
+                                    type_similar_entities.append((entity, float(similarity)))
                     
-                    # 按相似度排序并返回top_k
-                    similar_entities.sort(key=lambda x: x[1], reverse=True)
-                    return similar_entities[:top_k]
+                    # 按相似度排序
+                    type_similar_entities.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # 合并向量搜索结果和类型搜索结果
+                    all_similar_entities = []
+                    seen_entities = set()
+                    
+                    # 优先添加类型搜索结果
+                    for entity, score in type_similar_entities:
+                        if entity.name not in seen_entities:
+                            all_similar_entities.append((entity, score))
+                            seen_entities.add(entity.name)
+                    
+                    # 添加向量搜索结果
+                    for entity, score in vector_similar_entities:
+                        if entity.name not in seen_entities:
+                            all_similar_entities.append((entity, score))
+                            seen_entities.add(entity.name)
+                    
+                    return all_similar_entities[:top_k]
             
-            # 如果没有type或type中没有找到相似实体，在所有实体中搜索
+            # 如果没有type或type中没有找到相似实体，返回向量搜索结果
             logger.info("在所有实体中搜索相似实体")
-            return self._get_vectorization_service().search_similar_entities(input_entity, top_k)
+            return vector_similar_entities[:top_k]
             
         except Exception as e:
             logger.error(f"智能搜索相似实体失败: {e}")
@@ -199,7 +270,8 @@ class DisambiguationService:
                 candidate_text = self._entity_to_text(candidate_entity)
                 
                 cross_score = self.cross_encoder.predict([(input_text, candidate_text)])[0]
-                score.cross_encoder_score = float(cross_score)
+                # 使用sigmoid归一化CrossEncoder得分
+                score.cross_encoder_score = self.normalize_crossencoder_score(float(cross_score))
             
             # 步骤2: RapidFuzz字符串相似度
             score.fuzz_score = self._calculate_fuzz_score(input_entity, candidate_entity)
@@ -215,11 +287,28 @@ class DisambiguationService:
                 score.levenshtein_score * settings.LEVENSHTEIN_WEIGHT
             )
             
+            # 步骤5: 应用类型匹配权重
+            type_multiplier = self._calculate_type_multiplier(input_entity, candidate_entity)
+            score.final_score *= type_multiplier
+            
         except Exception as e:
             logger.error(f"计算综合得分失败: {e}")
             score.final_score = bge_score * 0.5  # 降级处理
         
         return score
+    
+    def _calculate_type_multiplier(self, input_entity: Entity, candidate_entity: Entity) -> float:
+        """计算类型匹配权重倍数"""
+        # 如果任一实体没有类型信息，返回中性权重
+        if not input_entity.type or not candidate_entity.type:
+            return 1.0
+        
+        # 类型完全匹配
+        if input_entity.type == candidate_entity.type:
+            return settings.TYPE_MATCH_BONUS
+        
+        # 类型不匹配，应用惩罚
+        return settings.TYPE_MISMATCH_PENALTY
     
     def _calculate_fuzz_score(self, input_entity: Entity, candidate_entity: Entity) -> float:
         """计算RapidFuzz相似度得分"""
@@ -348,33 +437,30 @@ class DisambiguationService:
         return " ".join(parts)
     
     def _generate_similarity_details(self, input_entity: Entity, candidate_entity: Entity, score: EntityScore) -> str:
-        """生成相似度详情"""
+        """生成相似度详情说明"""
         details = []
         
-        if score.bge_score > 0:
-            details.append(f"语义相似度: {score.bge_score:.3f}")
+        # 基本信息
+        details.append(f"输入实体: {input_entity.name} ({input_entity.type or '无类型'})")
+        details.append(f"候选实体: {candidate_entity.name} ({candidate_entity.type or '无类型'})")
         
-        if score.cross_encoder_score > 0:
-            details.append(f"交叉编码器得分: {score.cross_encoder_score:.3f}")
+        # 类型匹配信息
+        if input_entity.type and candidate_entity.type:
+            if input_entity.type == candidate_entity.type:
+                details.append(f"✅ 类型匹配: {input_entity.type}")
+            else:
+                details.append(f"❌ 类型不匹配: {input_entity.type} vs {candidate_entity.type}")
+        else:
+            details.append("⚠️ 类型信息不完整")
         
-        if score.fuzz_score > 0:
-            details.append(f"字符串匹配得分: {score.fuzz_score:.3f}")
+        # 各项得分
+        details.append(f"BGE向量相似度: {score.bge_score:.3f}")
+        details.append(f"CrossEncoder重排序: {score.cross_encoder_score:.3f}")
+        details.append(f"字符串模糊匹配: {score.fuzz_score:.3f}")
+        details.append(f"编辑距离相似度: {score.levenshtein_score:.3f}")
+        details.append(f"最终加权得分: {score.final_score:.3f}")
         
-        if score.levenshtein_score > 0:
-            details.append(f"编辑距离得分: {score.levenshtein_score:.3f}")
-        
-        details.append(f"最终得分: {score.final_score:.3f}")
-        
-        # 添加名称比较
-        if input_entity.name == candidate_entity.name:
-            details.append("名称完全匹配")
-        
-        # 添加别名比较
-        common_aliases = set(input_entity.aliases) & set(candidate_entity.aliases)
-        if common_aliases:
-            details.append(f"共同别名: {', '.join(common_aliases)}")
-        
-        return "; ".join(details)
+        return "\n".join(details)
     
     def _save_history(self, input_entity: Entity, result: DisambiguationResult):
         """保存消歧历史"""
