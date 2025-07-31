@@ -15,7 +15,7 @@ class AutoDecideRequest(BaseModel):
             "example": {
                 "entity": {
                     "name": "糖尿病",
-                    "type": "疾病",
+                    "type": "疾病",  # 可选字段
                     "aliases": ["diabetes", "糖尿"],
                     "definition": "糖尿病是一组以高血糖为特征的代谢性疾病...",
                     "attributes": {
@@ -79,7 +79,7 @@ class MatchCandidatesRequest(BaseModel):
             "example": {
                 "entity": {
                     "name": "糖尿病",
-                    "type": "疾病",
+                    "type": "疾病",  # 可选字段
                     "aliases": ["diabetes"],
                     "definition": "糖尿病是一组以高血糖为特征的代谢性疾病"
                 },

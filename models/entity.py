@@ -6,22 +6,11 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 from enum import Enum
 
-class EntityType(str, Enum):
-    """实体类型枚举"""
-    DISEASE = "疾病"
-    SYMPTOM = "症状"
-    DRUG = "药物"
-    TREATMENT = "治疗"
-    GENE = "基因"
-    PROTEIN = "蛋白质"
-    ORGAN = "器官"
-    OTHER = "其他"
-
 class Entity(BaseModel):
     """实体模型"""
     id: Optional[str] = None
     name: str = Field(..., description="实体名称")
-    type: EntityType = Field(..., description="实体类型")
+    type: Optional[str] = Field(None, description="实体类型（可选，用于缩小搜索范围）")
     aliases: List[str] = Field(default_factory=list, description="别名列表")
     definition: Optional[str] = Field(None, description="实体定义")
     attributes: Dict[str, Any] = Field(default_factory=dict, description="实体属性")

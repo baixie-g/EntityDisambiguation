@@ -70,10 +70,8 @@ class DisambiguationService:
     def auto_decide(self, input_entity: Entity, force_decision: bool = False) -> DisambiguationResult:
         """自动决策实体消歧"""
         try:
-            # 步骤1: 使用FAISS索引检索相似实体
-            similar_entities = self._get_vectorization_service().search_similar_entities(
-                input_entity, top_k=settings.FAISS_TOP_K
-            )
+            # 步骤1: 智能搜索相似实体
+            similar_entities = self._smart_search_similar_entities(input_entity, top_k=settings.FAISS_TOP_K)
             
             if not similar_entities:
                 # 没有找到相似实体，直接新建
@@ -117,13 +115,48 @@ class DisambiguationService:
                 reasoning=f"处理失败: {str(e)}"
             )
     
+    def _smart_search_similar_entities(self, input_entity: Entity, top_k: int = 10) -> List[Tuple[Entity, float]]:
+        """智能搜索相似实体，支持可选的type字段"""
+        try:
+            # 如果提供了type字段，优先在指定type中搜索
+            if input_entity.type:
+                logger.info(f"在指定类型 '{input_entity.type}' 中搜索相似实体")
+                
+                # 获取指定type的所有实体
+                type_entities = self._get_db_manager().get_entities_by_type(input_entity.type)
+                
+                if type_entities:
+                    # 在指定type中计算相似度
+                    similar_entities = []
+                    for entity in type_entities:
+                        # 使用向量化服务计算相似度
+                        vector_score = self._get_vectorization_service().get_entity_vector(entity)
+                        if vector_score is not None:
+                            input_vector = self._get_vectorization_service().get_entity_vector(input_entity)
+                            if input_vector is not None:
+                                # 计算余弦相似度
+                                similarity = np.dot(input_vector, vector_score) / (np.linalg.norm(input_vector) * np.linalg.norm(vector_score))
+                                if similarity > settings.LOW_THRESHOLD:
+                                    similar_entities.append((entity, float(similarity)))
+                    
+                    # 按相似度排序并返回top_k
+                    similar_entities.sort(key=lambda x: x[1], reverse=True)
+                    return similar_entities[:top_k]
+            
+            # 如果没有type或type中没有找到相似实体，在所有实体中搜索
+            logger.info("在所有实体中搜索相似实体")
+            return self._get_vectorization_service().search_similar_entities(input_entity, top_k)
+            
+        except Exception as e:
+            logger.error(f"智能搜索相似实体失败: {e}")
+            # 降级到全局搜索
+            return self._get_vectorization_service().search_similar_entities(input_entity, top_k)
+    
     def match_candidates(self, input_entity: Entity, top_k: int = 10) -> List[CandidateMatch]:
         """获取匹配候选实体"""
         try:
-            # 使用FAISS索引检索相似实体
-            similar_entities = self._get_vectorization_service().search_similar_entities(
-                input_entity, top_k=top_k
-            )
+            # 使用智能搜索逻辑
+            similar_entities = self._smart_search_similar_entities(input_entity, top_k=top_k)
             
             if not similar_entities:
                 return []

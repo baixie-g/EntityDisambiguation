@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 
-from models import Entity, EntityType
+from models import Entity
 from services import db_manager, vectorization_service
 
 # 配置日志
@@ -37,7 +37,7 @@ def load_sample_entities():
             entity = Entity(
                 id=item.get('id'),
                 name=item['name'],
-                type=EntityType(item['type']),
+                type=item.get('type'),  # 直接使用字符串
                 aliases=item.get('aliases', []),
                 definition=item.get('definition'),
                 attributes=item.get('attributes', {}),
@@ -93,7 +93,7 @@ def test_disambiguation():
         # 创建测试实体
         test_entity = Entity(
             name="糖尿病",
-            type=EntityType.疾病,
+            type="疾病",  # 可以保持使用字符串
             aliases=["diabetes"],
             definition="糖尿病是一组以高血糖为特征的代谢性疾病"
         )

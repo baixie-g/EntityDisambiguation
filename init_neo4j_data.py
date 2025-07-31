@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 
-from models import Entity, EntityType
+from models import Entity
 from services.neo4j_database import create_neo4j_db_service
 from services.vectorization import vectorization_service
 
@@ -38,13 +38,13 @@ def init_neo4j_entities():
         with open(sample_file, 'r', encoding='utf-8') as f:
             sample_data = json.load(f)
         
-        # 转换为实体对象并保存到Neo4j
+        # 转换为实体对象并保存
         entities = []
         for item in sample_data:
             entity = Entity(
                 id=item.get('id'),
                 name=item['name'],
-                type=EntityType(item['type']),
+                type=item.get('type'),  # 直接使用字符串
                 aliases=item.get('aliases', []),
                 definition=item.get('definition'),
                 attributes=item.get('attributes', {}),

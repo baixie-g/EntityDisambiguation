@@ -104,7 +104,8 @@ class Neo4jDatabaseService:
             with self.driver.session() as session:
                 # 如果没有ID，生成一个
                 if not entity.id:
-                    entity.id = self._generate_entity_id(entity.type.value, entity.name)
+                    type_value = entity.type if entity.type else "other"
+                    entity.id = self._generate_entity_id(type_value, entity.name)
                 
                 # 构建Cypher查询
                 query = """
@@ -123,7 +124,7 @@ class Neo4jDatabaseService:
                 result = session.run(query, {
                     'id': entity.id,
                     'name': entity.name,
-                    'type': entity.type.value,
+                    'type': entity.type,
                     'aliases': entity.aliases,
                     'definition': entity.definition,
                     'attributes': json.dumps(entity.attributes, ensure_ascii=False),

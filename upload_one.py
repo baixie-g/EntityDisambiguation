@@ -7,7 +7,7 @@ import logging
 import sys
 from datetime import datetime
 
-from models import Entity, EntityType
+from models import Entity
 from services.neo4j_database import create_neo4j_db_service
 
 # 配置日志
@@ -38,10 +38,10 @@ def upload_entity_from_json(json_data: dict):
     try:
         entity_data = json_data.get("entity", {})
         
-        # 构建Entity对象
+        # 创建实体对象
         entity = Entity(
             name=entity_data["name"],
-            type=EntityType(entity_data["type"]),
+            type=entity_data.get("type"),  # 改为可选
             aliases=entity_data.get("aliases", []),
             definition=entity_data.get("definition"),
             attributes=entity_data.get("attributes", {}),
