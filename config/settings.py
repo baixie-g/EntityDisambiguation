@@ -69,7 +69,6 @@ class Settings(BaseSettings):
     FAISS_INDEX_PATH: str = "data/faiss_index"
     
     # Neo4j数据库配置（专门用于实体存储）
-    # NEO4J_URI: str = "bolt://47.105.115.60:7687"
     NEO4J_URI: str = "bolt://localhost:7687"
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = "12345678"

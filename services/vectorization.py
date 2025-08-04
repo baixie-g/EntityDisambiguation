@@ -9,6 +9,8 @@ from typing import List, Tuple, Optional, Dict, Any, Union
 from pathlib import Path
 import torch
 from sentence_transformers import SentenceTransformer
+import os
+import json
 
 from models import Entity, CandidateMatch, EntityScore
 from config.settings import settings
@@ -32,6 +34,8 @@ class VectorizationService:
         self.entity_id_mapping: Dict[int, str] = {}  # 索引位置到实体ID的映射
         self.model_loaded = False
         self.index_loaded = False
+        self.device = None
+        self.gpu_available = False
         
         # 延迟导入数据库管理器以避免循环导入
         self.db_manager = None
@@ -43,61 +47,211 @@ class VectorizationService:
             self.db_manager = db_manager
         return self.db_manager
     
+    def _detect_gpu(self) -> bool:
+        """检测GPU可用性"""
+        try:
+            # 检查CUDA是否可用
+            if not torch.cuda.is_available():
+                logger.info("PyTorch CUDA不可用，将使用CPU")
+                self.device = torch.device('cpu')
+                return False
+            
+            # 检查GPU数量
+            gpu_count = torch.cuda.device_count()
+            if gpu_count == 0:
+                logger.info("未检测到GPU设备，将使用CPU")
+                self.device = torch.device('cpu')
+                return False
+            
+            # 获取第一个GPU的信息
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            
+            logger.info(f"检测到GPU: {gpu_name}")
+            logger.info(f"GPU内存: {gpu_memory:.1f}GB")
+            logger.info(f"GPU数量: {gpu_count}")
+            
+            # 设置默认GPU设备
+            torch.cuda.set_device(0)
+            self.device = torch.device('cuda:0')
+            
+            # 测试GPU是否真正可用
+            try:
+                test_tensor = torch.tensor([1.0], device=self.device)
+                result = test_tensor * 2
+                logger.info("GPU测试成功")
+                return True
+            except Exception as gpu_test_error:
+                logger.warning(f"GPU测试失败: {gpu_test_error}")
+                self.device = torch.device('cpu')
+                return False
+                
+        except Exception as e:
+            logger.warning(f"GPU检测失败: {e}")
+            self.device = torch.device('cpu')
+            return False
+    
+    def _check_nvidia_prime_status(self) -> str:
+        """检查NVIDIA Prime状态"""
+        try:
+            import subprocess
+            result = subprocess.run(['prime-select', 'query'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                return result.stdout.strip()
+            else:
+                return "unknown"
+        except Exception as e:
+            logger.debug(f"检查Prime状态失败: {e}")
+            return "unknown"
+    
+    def _try_enable_gpu(self) -> bool:
+        """尝试启用GPU"""
+        try:
+            # 检查Prime状态
+            prime_status = self._check_nvidia_prime_status()
+            logger.info(f"NVIDIA Prime状态: {prime_status}")
+            
+            if prime_status == "on-demand":
+                logger.warning("检测到on-demand模式，GPU可能不可用")
+                logger.info("建议运行: sudo prime-select nvidia 然后重启系统")
+                return False
+            elif prime_status == "nvidia":
+                logger.info("NVIDIA专用模式已启用")
+                # 尝试重新检测GPU
+                return self._detect_gpu()
+            else:
+                logger.info(f"Prime状态: {prime_status}")
+                return self._detect_gpu()
+                
+        except Exception as e:
+            logger.warning(f"尝试启用GPU失败: {e}")
+            return False
+    
+    def _find_valid_model_cache(self, model_name: str) -> Optional[str]:
+        """查找有效的本地模型缓存"""
+        try:
+            # 构建缓存路径
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+            
+            # 尝试多种可能的模型目录名称
+            possible_names = [
+                f"models--{model_name.replace('/', '--')}",
+                f"models--{model_name.replace('/', '--').lower()}",
+                model_name.replace('/', '_'),
+                model_name.replace('/', '-')
+            ]
+            
+            for name in possible_names:
+                model_dir = cache_dir / name
+                if not model_dir.exists():
+                    continue
+                
+                logger.info(f"发现模型目录: {model_dir}")
+                
+                # 检查snapshots目录
+                snapshots_dir = model_dir / "snapshots"
+                if snapshots_dir.exists():
+                    snapshots = list(snapshots_dir.iterdir())
+                    if snapshots:
+                        # 按修改时间排序，取最新的
+                        latest_snapshot = max(snapshots, key=lambda x: x.stat().st_mtime)
+                        model_path = str(latest_snapshot)
+                        
+                        # 验证模型文件是否完整
+                        if self._validate_model_files(model_path):
+                            logger.info(f"找到有效的本地模型缓存: {model_path}")
+                            return model_path
+                        else:
+                            logger.warning(f"模型文件不完整: {model_path}")
+                
+                # 检查refs目录
+                refs_dir = model_dir / "refs"
+                if refs_dir.exists():
+                    for ref_file in refs_dir.iterdir():
+                        if ref_file.is_file():
+                            with open(ref_file, 'r') as f:
+                                commit_hash = f.read().strip()
+                            model_path = str(model_dir / "snapshots" / commit_hash)
+                            if Path(model_path).exists() and self._validate_model_files(model_path):
+                                logger.info(f"找到有效的本地模型缓存: {model_path}")
+                                return model_path
+            
+            logger.info("未找到有效的本地模型缓存")
+            return None
+            
+        except Exception as e:
+            logger.error(f"查找模型缓存失败: {e}")
+            return None
+    
+    def _validate_model_files(self, model_path: str) -> bool:
+        """验证模型文件是否完整"""
+        try:
+            required_files = ['config.json', 'pytorch_model.bin']
+            model_path_obj = Path(model_path)
+            
+            for file_name in required_files:
+                file_path = model_path_obj / file_name
+                if not file_path.exists():
+                    logger.debug(f"缺少模型文件: {file_path}")
+                    return False
+            
+            # 检查config.json是否有效
+            config_file = model_path_obj / 'config.json'
+            try:
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                if not config:
+                    logger.debug("config.json为空")
+                    return False
+            except Exception as e:
+                logger.debug(f"config.json解析失败: {e}")
+                return False
+            
+            logger.debug(f"模型文件验证通过: {model_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"验证模型文件失败: {e}")
+            return False
+    
     def load_bge_model(self):
         """加载BGE-M3模型"""
         if self.model_loaded:
             return
             
         try:
-            # 检查GPU可用性
-            gpu_available = False
-            try:
-                gpu_available = torch.cuda.is_available()
-                if gpu_available:
-                    logger.info(f"检测到GPU: {torch.cuda.get_device_name(0)}")
-                    logger.info(f"GPU内存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
-                else:
-                    logger.info("未检测到GPU，将使用CPU")
-            except Exception as gpu_error:
-                logger.warning(f"GPU检测失败: {gpu_error}")
-                gpu_available = False
+            # 尝试启用GPU
+            self.gpu_available = self._try_enable_gpu()
             
             if BGE_M3_AVAILABLE:
                 logger.info(f"加载BGE-M3模型: {settings.BGE_MODEL_NAME}")
                 
                 # 优先使用本地缓存
-                cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
-                model_dir = cache_dir / "models--BAAI--bge-m3"
+                local_model_path = self._find_valid_model_cache(settings.BGE_MODEL_NAME)
                 
-                if model_dir.exists():
-                    # 查找snapshots下的最新快照
-                    snapshots_dir = model_dir / "snapshots"
-                    if snapshots_dir.exists():
-                        snapshots = list(snapshots_dir.iterdir())
-                        if snapshots:
-                            # 按修改时间排序，取最新的
-                            latest_snapshot = max(snapshots, key=lambda x: x.stat().st_mtime)
-                            model_path = str(latest_snapshot)
-                            logger.info(f"发现本地模型缓存: {model_path}")
-                            try:
-                                if gpu_available:
-                                    self.bge_model = BGEM3FlagModel(model_path, use_fp16=True)
-                                    logger.info("BGE-M3模型加载成功 (GPU模式，本地缓存)")
-                                else:
-                                    self.bge_model = BGEM3FlagModel(model_path, use_fp16=False)
-                                    logger.info("BGE-M3模型加载成功 (CPU模式，本地缓存)")
-                                self.model_loaded = True
-                                return
-                            except Exception as cache_error:
-                                logger.warning(f"本地缓存加载失败: {cache_error}")
+                if local_model_path:
+                    try:
+                        logger.info(f"使用本地模型缓存: {local_model_path}")
+                        if self.gpu_available:
+                            self.bge_model = BGEM3FlagModel(local_model_path, use_fp16=True)
+                            logger.info("BGE-M3模型加载成功 (GPU模式，本地缓存)")
+                        else:
+                            self.bge_model = BGEM3FlagModel(local_model_path, use_fp16=False)
+                            logger.info("BGE-M3模型加载成功 (CPU模式，本地缓存)")
+                        self.model_loaded = True
+                        return
+                    except Exception as cache_error:
+                        logger.warning(f"本地缓存加载失败: {cache_error}")
+                        logger.info("尝试从网络下载模型")
                 
                 # 如果本地缓存不存在或加载失败，尝试从网络下载
-                logger.info("本地缓存不可用，尝试从网络下载")
+                logger.info("从网络下载BGE-M3模型")
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
                         logger.info(f"尝试加载BGE-M3模型 (第{attempt + 1}次)")
-                        if gpu_available:
+                        if self.gpu_available:
                             self.bge_model = BGEM3FlagModel(settings.BGE_MODEL_NAME, use_fp16=True)
                             logger.info("BGE-M3模型加载成功 (GPU模式)")
                         else:
@@ -121,35 +275,27 @@ class VectorizationService:
                 logger.info("尝试使用sentence-transformers加载模型")
                 
                 # 优先使用本地缓存
-                cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
-                model_dir = cache_dir / "models--BAAI--bge-m3"
+                local_model_path = self._find_valid_model_cache(settings.BGE_MODEL_NAME)
                 
-                if model_dir.exists():
-                    # 查找snapshots下的最新快照
-                    snapshots_dir = model_dir / "snapshots"
-                    if snapshots_dir.exists():
-                        snapshots = list(snapshots_dir.iterdir())
-                        if snapshots:
-                            # 按修改时间排序，取最新的
-                            latest_snapshot = max(snapshots, key=lambda x: x.stat().st_mtime)
-                            model_path = str(latest_snapshot)
-                            logger.info(f"使用本地缓存的sentence-transformers模型: {model_path}")
-                            device = torch.device('cuda' if gpu_available else 'cpu')
-                            self.bge_model = SentenceTransformer(model_path, device=device)
-                            self.model_loaded = True
-                            logger.info(f"sentence-transformers模型加载成功 ({'GPU' if gpu_available else 'CPU'}模式，本地缓存)")
-                            return
+                if local_model_path:
+                    try:
+                        logger.info(f"使用本地缓存的sentence-transformers模型: {local_model_path}")
+                        self.bge_model = SentenceTransformer(local_model_path, device=self.device)
+                        self.model_loaded = True
+                        logger.info(f"sentence-transformers模型加载成功 ({'GPU' if self.gpu_available else 'CPU'}模式，本地缓存)")
+                        return
+                    except Exception as cache_error:
+                        logger.warning(f"本地缓存加载失败: {cache_error}")
                 
                 # 如果本地缓存不存在，尝试从网络下载
-                logger.info("本地缓存不可用，尝试从网络下载sentence-transformers模型")
+                logger.info("从网络下载sentence-transformers模型")
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
                         logger.info(f"尝试下载sentence-transformers模型 (第{attempt + 1}次)")
-                        device = torch.device('cuda' if gpu_available else 'cpu')
-                        self.bge_model = SentenceTransformer(settings.BGE_MODEL_NAME, device=device)
+                        self.bge_model = SentenceTransformer(settings.BGE_MODEL_NAME, device=self.device)
                         self.model_loaded = True
-                        logger.info(f"sentence-transformers模型加载成功 ({'GPU' if gpu_available else 'CPU'}模式)")
+                        logger.info(f"sentence-transformers模型加载成功 ({'GPU' if self.gpu_available else 'CPU'}模式)")
                         return
                     except Exception as e:
                         logger.warning(f"第{attempt + 1}次尝试失败: {e}")
@@ -162,7 +308,7 @@ class VectorizationService:
                 logger.error(f"加载句子变换器模型失败: {e2}")
                 # 最后的回退：使用简单的随机向量
                 logger.warning("使用随机向量作为回退方案")
-                self._use_random_vectors = True
+                self._use_random_vectors()
                 self.model_loaded = True
     
     def _use_random_vectors(self):
@@ -233,12 +379,9 @@ class VectorizationService:
                 # 使用BGE-M3模型
                 try:
                     logger.debug(f"使用BGE-M3编码文本: {full_text[:100]}...")
-                    logger.debug(f"BGE-M3模型类型: {type(self.bge_model)}")
-                    logger.debug(f"BGE-M3模型是否有encode方法: {hasattr(self.bge_model, 'encode')}")
                     
                     embeddings = self.bge_model.encode([full_text])
                     logger.debug(f"BGE-M3编码结果类型: {type(embeddings)}")
-                    logger.debug(f"BGE-M3编码结果内容: {embeddings}")
                     
                     if isinstance(embeddings, dict):
                         if 'dense_vecs' in embeddings and embeddings['dense_vecs'] is not None:
@@ -252,7 +395,6 @@ class VectorizationService:
                                 raise ValueError("BGE-M3编码返回空的dense_vecs")
                         else:
                             logger.error("BGE-M3返回的字典中没有有效的dense_vecs")
-                            logger.error(f"embeddings keys: {embeddings.keys() if isinstance(embeddings, dict) else 'Not dict'}")
                             raise ValueError("BGE-M3编码返回无效结果")
                     else:
                         if len(embeddings) > 0:
@@ -264,10 +406,11 @@ class VectorizationService:
                             raise ValueError("BGE-M3编码返回空结果")
                 except Exception as bge_error:
                     logger.warning(f"BGE-M3编码失败，尝试CPU回退: {bge_error}")
-                    logger.warning(f"BGE-M3错误类型: {type(bge_error).__name__}")
                     # 如果BGE-M3失败，尝试重新加载为CPU模式
                     try:
                         logger.info("重新加载BGE-M3模型为CPU模式")
+                        self.device = torch.device('cpu')
+                        self.gpu_available = False
                         self.bge_model = BGEM3FlagModel(settings.BGE_MODEL_NAME, use_fp16=False)
                         embeddings = self.bge_model.encode([full_text])
                         if isinstance(embeddings, dict):
@@ -293,7 +436,6 @@ class VectorizationService:
                                 raise ValueError("BGE-M3 CPU模式编码返回空结果")
                     except Exception as cpu_error:
                         logger.error(f"BGE-M3 CPU模式也失败: {cpu_error}")
-                        logger.error(f"CPU错误类型: {type(cpu_error).__name__}")
                         raise cpu_error
             else:
                 # 使用sentence-transformers

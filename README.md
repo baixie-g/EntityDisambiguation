@@ -72,7 +72,7 @@ python main.py
 {
   "entity": {
     "name": "糖尿病",
-    "type": "疾病",  # 可选字段，支持预定义类型或自定义字符串
+    "type": "疾病", 
     "aliases": ["diabetes", "糖尿"],
     "definition": "糖尿病是一组以高血糖为特征的代谢性疾病...",
     "attributes": {

@@ -143,3 +143,9 @@ temp/
 *.db
 *.sqlite
 *.sqlite3 
+
+# 测试相关文件夹及内容不上传
+test/
+test/*
+tests/
+tests/*
