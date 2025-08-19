@@ -23,13 +23,46 @@ except ImportError:
 class Neo4jDatabaseService:
     """Neo4j数据库服务类"""
     
-    def __init__(self, uri: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None):
+    def __init__(self, uri: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, 
+                 database_name: Optional[str] = None, db_info: Optional[Dict] = None):
         if not NEO4J_AVAILABLE:
             raise ImportError("Neo4j驱动未安装，请运行: pip install neo4j")
             
         self.uri = uri or settings.NEO4J_URI
         self.user = user or settings.NEO4J_USER
         self.password = password or settings.NEO4J_PASSWORD
+        self.database_name = database_name or settings.NEO4J_DATABASE
+        
+        # 存储数据库的详细信息
+        if db_info:
+            self.db_id = db_info.get('id', 'unknown')
+            self.db_name = db_info.get('name', f'Database {self.db_id}')
+            self.host = db_info.get('host', 'unknown')
+            self.port = db_info.get('port', 7687)
+            self.remark = db_info.get('remark', '')
+            self.status = db_info.get('status', 1)
+            self.valid_flag = db_info.get('valid_flag', True)
+            self.del_flag = db_info.get('del_flag', False)
+        else:
+            # 从URI解析信息
+            self.db_id = 'default'
+            self.db_name = 'Default Database'
+            if '://' in self.uri:
+                host_port = self.uri.split('://')[1]
+                if ':' in host_port:
+                    self.host, self.port = host_port.split(':')
+                    self.port = int(self.port)
+                else:
+                    self.host = host_port
+                    self.port = 7687
+            else:
+                self.host = 'localhost'
+                self.port = 7687
+            self.remark = ''
+            self.status = 1
+            self.valid_flag = True
+            self.del_flag = False
+        
         self.driver = None
         self.connect()
     

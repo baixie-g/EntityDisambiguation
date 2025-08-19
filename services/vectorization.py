@@ -30,10 +30,11 @@ class VectorizationService:
     
     def __init__(self):
         self.bge_model: Optional[Union[SentenceTransformer, Any]] = None
-        self.faiss_index: Optional[faiss.Index] = None
-        self.entity_id_mapping: Dict[int, str] = {}  # 索引位置到实体ID的映射
+        # 多数据库索引容器
+        self.faiss_index_map: Dict[str, faiss.Index] = {}
+        self.entity_id_mapping_map: Dict[str, Dict[int, str]] = {}
         self.model_loaded = False
-        self.index_loaded = False
+        self.index_loaded_map: Dict[str, bool] = {}
         self.device = None
         self.gpu_available = False
         
@@ -457,8 +458,22 @@ class VectorizationService:
             # 返回零向量
             return np.zeros(settings.EMBEDDING_DIM)
     
-    def build_faiss_index(self, entities: List[Entity]) -> bool:
-        """构建FAISS索引"""
+    def _index_prefix(self, db_key: Optional[str]) -> str:
+        # 获取正确的默认数据库键名
+        if db_key is None:
+            db_manager = self._get_db_manager()
+            if hasattr(db_manager, 'get_default_key'):
+                key = db_manager.get_default_key()
+            else:
+                key = 'default'
+        else:
+            key = db_key
+            
+        base = settings.FAISS_INDEX_PATH
+        return f"{base}_{key}" if key else base
+
+    def build_faiss_index(self, entities: List[Entity], db_key: Optional[str] = None) -> bool:
+        """构建FAISS索引（按数据库键）"""
         try:
             if not self.model_loaded:
                 self.load_bge_model()
@@ -488,87 +503,119 @@ class VectorizationService:
             
             # 构建FAISS索引
             dimension = vectors_array.shape[1]
-            self.faiss_index = faiss.IndexFlatIP(dimension)  # 使用内积相似度
+            # 获取正确的默认数据库键名
+            if db_key is None:
+                db_manager = self._get_db_manager()
+                if hasattr(db_manager, 'get_default_key'):
+                    key = db_manager.get_default_key()
+                else:
+                    key = 'default'
+            else:
+                key = db_key
+                
+            faiss_index = faiss.IndexFlatIP(dimension)  # 使用内积相似度
             
             # 添加向量到索引
-            self.faiss_index.add(vectors_array)
+            faiss_index.add(vectors_array)
             
             # 保存实体ID映射
-            self.entity_id_mapping = {i: entity_id for i, entity_id in enumerate(entity_ids)}
+            self.entity_id_mapping_map[key] = {i: entity_id for i, entity_id in enumerate(entity_ids)}
+            self.faiss_index_map[key] = faiss_index
             
             # 保存索引和映射
-            self.save_index()
+            self.save_index(db_key=key)
             
-            logger.info(f"FAISS索引构建完成，维度: {dimension}, 向量数量: {len(vectors)}")
-            self.index_loaded = True
+            logger.info(f"FAISS索引构建完成[{key}]，维度: {dimension}, 向量数量: {len(vectors)}")
+            self.index_loaded_map[key] = True
             return True
             
         except Exception as e:
             logger.error(f"构建FAISS索引失败: {e}")
             return False
     
-    def save_index(self):
-        """保存FAISS索引"""
+    def save_index(self, db_key: Optional[str] = None):
+        """保存FAISS索引（按数据库键）"""
         try:
-            if self.faiss_index is None:
-                logger.error("索引为空，无法保存")
-                return
+            # 获取正确的默认数据库键名
+            if db_key is None:
+                db_manager = self._get_db_manager()
+                if hasattr(db_manager, 'get_default_key'):
+                    key = db_manager.get_default_key()
+                else:
+                    key = 'default'
+            else:
+                key = db_key
                 
-            # 确保目录存在
-            Path(settings.FAISS_INDEX_PATH).parent.mkdir(parents=True, exist_ok=True)
-            
-            # 保存FAISS索引
-            faiss.write_index(self.faiss_index, f"{settings.FAISS_INDEX_PATH}.index")
-            
-            # 保存实体ID映射
-            with open(f"{settings.FAISS_INDEX_PATH}.mapping", 'wb') as f:
-                pickle.dump(self.entity_id_mapping, f)
-            
-            logger.info("FAISS索引保存成功")
-            
+            faiss_index = self.faiss_index_map.get(key)
+            mapping = self.entity_id_mapping_map.get(key)
+            if faiss_index is None or mapping is None:
+                logger.error("索引或映射为空，无法保存")
+                return
+            prefix = self._index_prefix(key)
+            Path(prefix).parent.mkdir(parents=True, exist_ok=True)
+            faiss.write_index(faiss_index, f"{prefix}.index")
+            with open(f"{prefix}.mapping", 'wb') as f:
+                pickle.dump(mapping, f)
+            logger.info(f"FAISS索引保存成功: {key}")
         except Exception as e:
-            logger.error(f"保存FAISS索引失败: {e}")
+            logger.error(f"保存FAISS索引失败[{db_key}]: {e}")
     
-    def load_index(self) -> bool:
-        """加载FAISS索引"""
+    def load_index(self, db_key: Optional[str] = None) -> bool:
+        """加载FAISS索引（按数据库键）"""
         try:
-            index_file = f"{settings.FAISS_INDEX_PATH}.index"
-            mapping_file = f"{settings.FAISS_INDEX_PATH}.mapping"
-            
+            # 获取正确的默认数据库键名
+            if db_key is None:
+                db_manager = self._get_db_manager()
+                if hasattr(db_manager, 'get_default_key'):
+                    key = db_manager.get_default_key()
+                else:
+                    key = 'default'
+            else:
+                key = db_key
+                
+            prefix = self._index_prefix(key)
+            index_file = f"{prefix}.index"
+            mapping_file = f"{prefix}.mapping"
             if not Path(index_file).exists() or not Path(mapping_file).exists():
-                logger.warning("FAISS索引文件不存在，需要重新构建")
+                logger.warning(f"FAISS索引文件不存在[{key}]，需要重新构建")
+                self.index_loaded_map[key] = False
                 return False
-            
-            # 加载FAISS索引
-            self.faiss_index = faiss.read_index(index_file)
-            
-            # 加载实体ID映射
+            self.faiss_index_map[key] = faiss.read_index(index_file)
             with open(mapping_file, 'rb') as f:
-                self.entity_id_mapping = pickle.load(f)
-            
-            logger.info("FAISS索引加载成功")
-            self.index_loaded = True
+                self.entity_id_mapping_map[key] = pickle.load(f)
+            logger.info(f"FAISS索引加载成功: {key}")
+            self.index_loaded_map[key] = True
             return True
-            
         except Exception as e:
-            logger.error(f"加载FAISS索引失败: {e}")
+            logger.error(f"加载FAISS索引失败[{db_key}]: {e}")
             return False
     
-    def search_similar_entities(self, query_entity: Entity, top_k: Optional[int] = None) -> List[Tuple[Entity, float]]:
-        """搜索相似实体"""
+    def search_similar_entities(self, query_entity: Entity, top_k: Optional[int] = None, db_key: Optional[str] = None) -> List[Tuple[Entity, float]]:
+        """搜索相似实体（按数据库键）"""
         try:
-            if not self.index_loaded:
-                if not self.load_index():
-                    logger.warning("索引未加载，尝试重新构建")
-                    entities = self._get_db_manager().get_all_entities()
-                    if not self.build_faiss_index(entities):
+            # 获取正确的默认数据库键名
+            if db_key is None:
+                db_manager = self._get_db_manager()
+                if hasattr(db_manager, 'get_default_key'):
+                    key = db_manager.get_default_key()
+                else:
+                    key = 'default'
+            else:
+                key = db_key
+                
+            if not self.index_loaded_map.get(key):
+                if not self.load_index(key):
+                    logger.warning(f"索引未加载[{key}]，尝试重新构建")
+                    entities = self._get_db_manager().get_all_entities(db_key=key)
+                    if not self.build_faiss_index(entities, db_key=key):
                         logger.error("无法构建索引")
                         return []
             
             if not self.model_loaded:
                 self.load_bge_model()
             
-            if self.faiss_index is None:
+            faiss_index = self.faiss_index_map.get(key)
+            if faiss_index is None:
                 logger.error("索引为空")
                 return []
             
@@ -578,7 +625,7 @@ class VectorizationService:
             
             # 搜索相似向量
             k = top_k or settings.FAISS_TOP_K
-            scores, indices = self.faiss_index.search(query_vector, k)
+            scores, indices = faiss_index.search(query_vector, k)
             
             # 获取相似实体
             similar_entities = []
@@ -586,13 +633,13 @@ class VectorizationService:
                 if idx == -1:  # 无效索引
                     continue
                     
-                entity_id = self.entity_id_mapping.get(idx)
+                entity_id = self.entity_id_mapping_map.get(key, {}).get(idx)
                 if entity_id:
                     # 尝试通过ID查找实体
-                    entity = self._get_db_manager().get_entity(entity_id)
+                    entity = self._get_db_manager().get_entity(entity_id, db_key=key)
                     if not entity:
                         # 如果通过ID找不到，尝试通过名称搜索
-                        entities = self._get_db_manager().search_entities(entity_id, limit=1)
+                        entities = self._get_db_manager().search_entities(entity_id, limit=1, db_key=key)
                         entity = entities[0] if entities else None
                     if entity:
                         similar_entities.append((entity, float(score)))
@@ -615,31 +662,52 @@ class VectorizationService:
             logger.error(f"获取实体向量失败: {e}")
             return None
     
-    def rebuild_index(self) -> bool:
-        """重建索引"""
+    def rebuild_index(self, db_key: Optional[str] = None) -> bool:
+        """重建索引（按数据库键）"""
         try:
-            logger.info("开始重建FAISS索引")
-            entities = self._get_db_manager().get_all_entities()
+            # 获取正确的默认数据库键名
+            if db_key is None:
+                db_manager = self._get_db_manager()
+                if hasattr(db_manager, 'get_default_key'):
+                    key = db_manager.get_default_key()
+                else:
+                    key = 'default'
+            else:
+                key = db_key
+                
+            logger.info(f"开始重建FAISS索引: {key}")
+            entities = self._get_db_manager().get_all_entities(db_key=key)
             
             if not entities:
                 logger.warning("没有实体可用于构建索引")
                 return False
             
-            return self.build_faiss_index(entities)
+            return self.build_faiss_index(entities, db_key=key)
             
         except Exception as e:
             logger.error(f"重建索引失败: {e}")
             return False
     
-    def add_entity_to_index(self, entity: Entity) -> bool:
-        """添加实体到索引"""
+    def add_entity_to_index(self, entity: Entity, db_key: Optional[str] = None) -> bool:
+        """添加实体到索引（按数据库键）"""
         try:
-            if not self.index_loaded:
-                if not self.load_index():
+            # 获取正确的默认数据库键名
+            if db_key is None:
+                db_manager = self._get_db_manager()
+                if hasattr(db_manager, 'get_default_key'):
+                    key = db_manager.get_default_key()
+                else:
+                    key = 'default'
+            else:
+                key = db_key
+                
+            if not self.index_loaded_map.get(key):
+                if not self.load_index(key):
                     logger.warning("索引未加载，无法添加实体")
                     return False
             
-            if self.faiss_index is None:
+            faiss_index = self.faiss_index_map.get(key)
+            if faiss_index is None:
                 logger.error("索引为空")
                 return False
             
@@ -648,29 +716,53 @@ class VectorizationService:
             vector = vector.reshape(1, -1).astype('float32')
             
             # 添加到索引
-            next_id = len(self.entity_id_mapping)
-            self.faiss_index.add(vector)
-            self.entity_id_mapping[next_id] = entity.id or f"entity_{next_id}"
+            mapping = self.entity_id_mapping_map.setdefault(key, {})
+            next_id = len(mapping)
+            faiss_index.add(vector)
+            mapping[next_id] = entity.id or f"entity_{next_id}"
             
             # 保存更新的索引
-            self.save_index()
+            self.save_index(db_key=key)
             
-            logger.info(f"实体 {entity.id} 添加到索引成功")
+            logger.info(f"实体 {entity.id} 添加到索引成功: {key}")
             return True
             
         except Exception as e:
             logger.error(f"添加实体到索引失败: {e}")
             return False
     
-    def get_index_stats(self) -> Dict[str, Any]:
-        """获取索引统计信息"""
+    def get_index_stats(self, db_key: Optional[str] = None) -> Dict[str, Any]:
+        """获取索引统计信息（默认数据库或指定数据库）"""
+        # 获取正确的默认数据库键名
+        if db_key is None:
+            db_manager = self._get_db_manager()
+            if hasattr(db_manager, 'get_default_key'):
+                key = db_manager.get_default_key()
+            else:
+                key = 'default'
+        else:
+            key = db_key
+            
+        faiss_index = self.faiss_index_map.get(key)
+        mapping = self.entity_id_mapping_map.get(key, {})
         stats = {
             "model_loaded": self.model_loaded,
-            "index_loaded": self.index_loaded,
-            "entity_count": len(self.entity_id_mapping) if self.entity_id_mapping else 0,
-            "index_dimension": self.faiss_index.d if self.faiss_index else 0
+            "index_loaded": self.index_loaded_map.get(key, False),
+            "entity_count": len(mapping) if mapping else 0,
+            "index_dimension": faiss_index.d if faiss_index else 0,
+            "database_key": key
         }
         return stats
+
+    def get_all_index_stats(self) -> Dict[str, Dict[str, Any]]:
+        """获取所有数据库的索引统计信息"""
+        result: Dict[str, Dict[str, Any]] = {}
+        keys = set(self.entity_id_mapping_map.keys()) | set(self.faiss_index_map.keys()) | set(self.index_loaded_map.keys())
+        if not keys and hasattr(self._get_db_manager(), 'list_databases'):
+            keys = set(self._get_db_manager().list_databases())
+        for key in keys:
+            result[key] = self.get_index_stats(db_key=key)
+        return result
 
 # 全局向量化服务实例
 vectorization_service = VectorizationService()

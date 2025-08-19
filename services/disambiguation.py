@@ -117,11 +117,11 @@ class DisambiguationService:
             logger.error(f"加载CrossEncoder模型失败: {e}")
             self.cross_encoder = None
     
-    def auto_decide(self, input_entity: Entity, force_decision: bool = False) -> DisambiguationResult:
+    def auto_decide(self, input_entity: Entity, force_decision: bool = False, db_key: Optional[str] = None) -> DisambiguationResult:
         """自动决策实体消歧"""
         try:
             # 步骤1: 智能搜索相似实体
-            similar_entities = self._smart_search_similar_entities(input_entity, top_k=settings.FAISS_TOP_K)
+            similar_entities = self._smart_search_similar_entities(input_entity, top_k=settings.FAISS_TOP_K, db_key=db_key)
             
             if not similar_entities:
                 # 没有找到相似实体，直接新建
@@ -165,18 +165,18 @@ class DisambiguationService:
                 reasoning=f"处理失败: {str(e)}"
             )
     
-    def _smart_search_similar_entities(self, input_entity: Entity, top_k: int = 10) -> List[Tuple[Entity, float]]:
+    def _smart_search_similar_entities(self, input_entity: Entity, top_k: int = 10, db_key: Optional[str] = None) -> List[Tuple[Entity, float]]:
         """智能搜索相似实体，支持可选的type字段"""
         try:
             # 首先尝试使用FAISS向量搜索
-            vector_similar_entities = self._get_vectorization_service().search_similar_entities(input_entity, top_k=top_k*2)
+            vector_similar_entities = self._get_vectorization_service().search_similar_entities(input_entity, top_k=top_k*2, db_key=db_key)
             
             # 如果提供了type字段，优先在指定type中搜索
             if input_entity.type:
                 logger.info(f"在指定类型 '{input_entity.type}' 中搜索相似实体")
                 
                 # 获取指定type的所有实体
-                type_entities = self._get_db_manager().get_entities_by_type(input_entity.type)
+                type_entities = self._get_db_manager().get_entities_by_type(input_entity.type, db_key=db_key)
                 
                 if type_entities:
                     # 在指定type中计算相似度
@@ -221,13 +221,13 @@ class DisambiguationService:
         except Exception as e:
             logger.error(f"智能搜索相似实体失败: {e}")
             # 降级到全局搜索
-            return self._get_vectorization_service().search_similar_entities(input_entity, top_k)
+            return self._get_vectorization_service().search_similar_entities(input_entity, top_k, db_key=db_key)
     
-    def match_candidates(self, input_entity: Entity, top_k: int = 10) -> List[CandidateMatch]:
+    def match_candidates(self, input_entity: Entity, top_k: int = 10, db_key: Optional[str] = None) -> List[CandidateMatch]:
         """获取匹配候选实体"""
         try:
             # 使用智能搜索逻辑
-            similar_entities = self._smart_search_similar_entities(input_entity, top_k=top_k)
+            similar_entities = self._smart_search_similar_entities(input_entity, top_k=top_k, db_key=db_key)
             
             if not similar_entities:
                 return []

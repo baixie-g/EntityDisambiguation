@@ -9,6 +9,7 @@ class AutoDecideRequest(BaseModel):
     """自动决策请求"""
     entity: Entity = Field(..., description="待消歧的实体")
     force_decision: bool = Field(False, description="是否强制决策，跳过歧义判断")
+    database_key: Optional[str] = Field(None, description="目标Neo4j数据库键（可选，不填则使用默认）")
     
     class Config:
         json_schema_extra = {
@@ -25,7 +26,8 @@ class AutoDecideRequest(BaseModel):
                     },
                     "source": "临床指南-2022"
                 },
-                "force_decision": False
+                "force_decision": False,
+                "database_key": "default"
             }
         }
 
@@ -73,6 +75,7 @@ class MatchCandidatesRequest(BaseModel):
     entity: Entity = Field(..., description="待匹配的实体")
     top_k: int = Field(10, description="返回的候选实体数量")
     include_scores: bool = Field(True, description="是否包含详细得分")
+    database_key: Optional[str] = Field(None, description="目标Neo4j数据库键（可选，不填则使用默认）")
     
     class Config:
         json_schema_extra = {
@@ -84,7 +87,8 @@ class MatchCandidatesRequest(BaseModel):
                     "definition": "糖尿病是一组以高血糖为特征的代谢性疾病"
                 },
                 "top_k": 5,
-                "include_scores": True
+                "include_scores": True,
+                "database_key": "default"
             }
         }
 

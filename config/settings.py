@@ -69,10 +69,38 @@ class Settings(BaseSettings):
     FAISS_INDEX_PATH: str = "data/faiss_index"
     
     # Neo4j数据库配置（专门用于实体存储）
+    # 单库字段（向后兼容，不再直接使用，默认用于填充multi配置）
     NEO4J_URI: str = "bolt://localhost:7687"
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = "12345678"
     NEO4J_DATABASE: str = "neo4j"  # 数据库名称
+
+    # 多Neo4j库配置：键为数据库key（别名），值为连接信息
+    # 可通过环境变量或配置文件覆盖
+    NEO4J_DATABASES: dict = {
+        "default": {
+            "uri": "bolt://localhost:7687",
+            "user": "neo4j",
+            "password": "12345678",
+            "database": "neo4j"
+        },
+        # "remote": {
+        #     "uri": "bolt://47.105.115.60:7687",
+        #     "user": "neo4j",
+        #     "password": "12345678",
+        #     "database": "neo4j"
+        # }
+    }
+    DEFAULT_NEO4J_KEY: str = "default"
+    
+    # Nacos配置中心
+    NACOS_SERVER_ADDR: str = "localhost:8848"
+    NACOS_NAMESPACE: str = ""
+    NACOS_USERNAME: str = "nacos"
+    NACOS_PASSWORD: str = "nacos"
+    NACOS_DATA_ID: str = "qknow-datasources"
+    NACOS_GROUP: str = "DEFAULT_GROUP"
+    NACOS_DEBUG: bool = True  # 启用Nacos调试模式
     
     # 向量维度
     EMBEDDING_DIM: int = 1024
